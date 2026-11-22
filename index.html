@@ -1,20 +1,26 @@
+
 <!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="utf-8">
-<title>Etapa 1 - Lobby y locomocion</title>
+<title>Etapa 2 - Escaleras y primer encuentro</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
 <script>
 /* ============ AJUSTES ============ */
-const SPAWN = {x:0, y:0, z:5};   // punto de aparicion
-const HAND_R = 0.09;             // radio de contacto de las manos
-const BODY_DROP = 0.55;          // el "pecho" cuelga bajo la cabeza (altura de gorila)
-const MAX_SPEED = 9;             // velocidad maxima (m/s)
+const SPAWN = {x:0, y:0, z:5};
+const HAND_R = 0.08;        // radio de contacto de las manos
+const CHEST_R = 0.25;       // esfera del pecho
+const HEAD_R = 0.2;         // esfera de la cabeza
+const BODY_DROP = 0.3;      // pecho bajo la cabeza (cabeza en reposo = 0.55 m del suelo)
+const MAX_SPEED = 9;
 const GRAVITY = 9.8;
+const GROUND_FRICTION = 14; // frenado al tocar el suelo (mas alto = menos desliza)
 
-/* ============ TEXTURA DE CONCRETO (procedural) ============ */
 const SOLIDS = [];
+let DOOR = null, APE = null;
+
+/* ============ TEXTURA DE CONCRETO ============ */
 const CONC = document.createElement('canvas');
 CONC.width = CONC.height = 256;
 (function(){
@@ -35,8 +41,8 @@ CONC.width = CONC.height = 256;
   }
 })();
 
-/* ============ FISICA: esfera contra cajas (AABB) ============ */
-const CN = new THREE.Vector3(); // normal del contacto mas profundo
+/* ============ FISICA: esfera contra cajas ============ */
+const CN = new THREE.Vector3();
 function probe(px,py,pz,r){
   let best = 0;
   for(let i=0;i<SOLIDS.length;i++){
@@ -49,7 +55,7 @@ function probe(px,py,pz,r){
     let depth, nx, ny, nz;
     if(d2 > 1e-10){
       const d = Math.sqrt(d2); depth = r-d; nx=dx/d; ny=dy/d; nz=dz/d;
-    } else { // centro dentro de la caja: salir por la cara mas cercana
+    } else {
       const f=[px-b.min.x,b.max.x-px,py-b.min.y,b.max.y-py,pz-b.min.z,b.max.z-pz];
       let k=0; for(let j=1;j<6;j++) if(f[j]<f[k]) k=j;
       depth = r+f[k]; nx=ny=nz=0;
@@ -61,70 +67,112 @@ function probe(px,py,pz,r){
   return best;
 }
 
-/* ============ LOBBY (geometria + colisiones) ============ */
+/* ============ MONO NEGRO (silueta) ============ */
+function makeApe(){
+  const g = new THREE.Group();
+  const mat = new THREE.MeshBasicMaterial({color:0x000000});
+  const cyl = new THREE.CylinderGeometry(1,1,1,8), sph = new THREE.SphereGeometry(1,10,8);
+  const part = (geo,x,y,z,sx,sy,sz,rz)=>{
+    const m = new THREE.Mesh(geo,mat); m.position.set(x,y,z); m.scale.set(sx,sy,sz);
+    if(rz) m.rotation.z = rz; g.add(m);
+  };
+  part(cyl, 0.14,0.38,0, 0.1,0.76,0.1);   // piernas
+  part(cyl,-0.14,0.38,0, 0.1,0.76,0.1);
+  part(sph, 0,1.05,0, 0.3,0.42,0.24);     // torso
+  part(sph, 0,1.62,0.1, 0.17,0.2,0.18);   // cabeza
+  part(cyl, 0.42,0.78,0.06, 0.07,1.05,0.07, 0.1);   // brazos largos
+  part(cyl,-0.42,0.78,0.06, 0.07,1.05,0.07,-0.1);
+  return g;
+}
+
+/* ============ NIVEL ============ */
 AFRAME.registerComponent('lobby',{
   init(){
+    const root = this.el.object3D;
     const base = new THREE.CanvasTexture(CONC);
     base.wrapS = base.wrapT = THREE.RepeatWrapping;
     if(THREE.SRGBColorSpace) base.colorSpace = THREE.SRGBColorSpace;
-    // [x, y, z, ancho, alto, fondo]  (suelo = y 0)
+    const cache = {};
+    const texFor = (w,h,d)=>{
+      const rx=Math.max(w,d)/3, ry=Math.max(h,Math.min(w,d))/3, key=rx.toFixed(1)+','+ry.toFixed(1);
+      if(!cache[key]){ const t=base.clone(); t.needsUpdate=true; t.repeat.set(rx,ry); cache[key]=t; }
+      return cache[key];
+    };
+    const add = (x,y,z,w,h,d,color)=>{
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d),
+        new THREE.MeshLambertMaterial({map:texFor(w,h,d), color:color||0xb0b0b0}));
+      m.position.set(x,y,z); root.add(m);
+      const s = {min:new THREE.Vector3(x-w/2,y-h/2,z-d/2), max:new THREE.Vector3(x+w/2,y+h/2,z+d/2)};
+      SOLIDS.push(s); return {mesh:m, solid:s};
+    };
+    // [x, y, z, ancho, alto, fondo]   suelo lobby y=0, suelo inferior y=-4
     const B = [
-      [0,-0.5,0, 17,1,17],        // suelo
-      [0,4.25,0, 17,0.5,17],      // techo
-      [0,2,-8.25, 17,4,0.5],      // pared norte
-      [0,2,8.25, 17,4,0.5],       // pared sur
-      [-8.25,2,0, 0.5,4,17],      // pared oeste
-      [8.25,2,0, 0.5,4,17],       // pared este
-      [-3,2,-3, 0.8,4,0.8],       // pilares
-      [3,2,-3, 0.8,4,0.8],
-      [-3,2,3, 0.8,4,0.8],
-      [3,2,3, 0.8,4,0.8],
-      [0,0.25,0, 2,0.5,0.6],      // banca central
-      [5.5,0.5,5.5, 1,1,1],       // cajas para trepar
-      [5.5,1.5,5.5, 1,1,1],
-      [6.6,0.4,5.5, 0.8,0.8,0.8],
-      [7.2,1.2,-3, 1.6,0.3,6],    // repisa baja
-      [7.2,2.5,-3, 1.6,0.3,6],    // repisa alta
-      [-6,1,-1, 0.6,2,3]          // muro bajo
+      // estructura
+      [0,-4.5,0, 17,1,17],            // suelo inferior
+      [0,4.25,0, 17,0.5,17],          // techo
+      [0,-0.5,-8.25, 17,9,0.5],       // paredes (de -5 a 4)
+      [0,-0.5,8.25, 17,9,0.5],
+      [-8.25,-0.5,0, 0.5,9,17],
+      [8.25,-0.5,0, 0.5,9,17],
+      // suelo del lobby con hueco para la escalera
+      [0,-0.5,2.9, 17,1,11.2],
+      [-5,-0.5,-5.6, 7,1,5.8],
+      [5,-0.5,-5.6, 7,1,5.8],
+      // lobby
+      [-3,2,-3, 0.8,4,0.8],[3,2,-3, 0.8,4,0.8],[-3,2,3, 0.8,4,0.8],[3,2,3, 0.8,4,0.8],
+      [0,0.25,0, 2,0.5,0.6],
+      [5.5,0.5,5.5, 1,1,1],[5.5,1.5,5.5, 1,1,1],[6.6,0.4,5.5, 0.8,0.8,0.8],
+      [7.2,1.2,-3, 1.6,0.3,6],[7.2,2.5,-3, 1.6,0.3,6],
+      [-6,1,-1, 0.6,2,3],
+      // cubo de la escalera: paredes, salida inferior y marco de la puerta
+      [-1.625,0,-5.35, 0.25,8,5.3],
+      [1.625,0,-4.75, 0.25,8,4.1],
+      [1.625,1.5,-7.4, 0.25,5,1.2],
+      [-1.15,2,-2.6, 0.7,4,0.15],[1.15,2,-2.6, 0.7,4,0.15],
+      [0,3.25,-2.6, 1.6,1.5,0.15],
+      // zona inferior
+      [-3,-2.5,-3, 0.8,3,0.8],[3,-2.5,-3, 0.8,3,0.8],[-3,-2.5,3, 0.8,3,0.8],[3,-2.5,3, 0.8,3,0.8],
+      [-5,-2.5,-4, 0.4,3,8],[3,-2.5,2, 0.4,3,6],[-1,-2.5,5, 6,3,0.4],[3.2,-2.5,-5.5, 2.6,3,0.4]
     ];
-    for(const [x,y,z,w,h,d] of B){
-      const t = base.clone(); t.needsUpdate = true;
-      t.repeat.set(Math.max(w,d)/3, Math.max(h,Math.min(w,d))/3);
-      const m = new THREE.Mesh(
-        new THREE.BoxGeometry(w,h,d),
-        new THREE.MeshStandardMaterial({map:t, color:0xb0b0b0, roughness:1, metalness:0})
-      );
-      m.position.set(x,y,z);
-      this.el.object3D.add(m);
-      SOLIDS.push({min:new THREE.Vector3(x-w/2,y-h/2,z-d/2), max:new THREE.Vector3(x+w/2,y+h/2,z+d/2)});
+    for(const b of B) add(b[0],b[1],b[2],b[3],b[4],b[5]);
+
+    // escalones: 9 de 0.4 m de alto bajando hacia el norte
+    for(let i=0;i<9;i++){
+      const top = -0.4*(i+1);
+      add(0,(top-4.5)/2,-2.7-0.45*i-0.225, 3,top+4.5,0.45, 0xa0a0a0);
     }
-    // puerta de escaleras (solo visual por ahora, Etapa 2)
-    const door = new THREE.Mesh(new THREE.BoxGeometry(2.4,2.6,0.1), new THREE.MeshBasicMaterial({color:0x000000}));
-    door.position.set(0,1.3,-7.95);
-    this.el.object3D.add(door);
+    // puerta corrediza
+    const d = add(0,1.25,-2.6, 1.6,2.5,0.15, 0x3a3d3a);
+    DOOR = {mesh:d.mesh, solid:d.solid, state:'closed', y0:1.25};
+    const sign = new THREE.Mesh(new THREE.BoxGeometry(0.5,0.14,0.02), new THREE.MeshBasicMaterial({color:0x1f7a3f}));
+    sign.position.set(0,3.25,-2.5); root.add(sign);
+
+    // mono negro al fondo del pasillo inferior
+    const ape = makeApe();
+    ape.position.set(7,-4,-7); ape.rotation.y = -Math.PI/2;
+    root.add(ape);
+    APE = {group:ape, x:7, z:-7, gone:false};
   }
 });
 
-/* ============ MANOS (esferas oscuras) ============ */
+/* ============ MANOS ============ */
 AFRAME.registerComponent('hand-body',{
   init(){
-    const m = new THREE.Mesh(
-      new THREE.SphereGeometry(0.07,12,8),
-      new THREE.MeshStandardMaterial({color:0x151515, emissive:0x2a2a2a, roughness:.8})
-    );
+    const m = new THREE.Mesh(new THREE.SphereGeometry(HAND_R,12,8),
+      new THREE.MeshStandardMaterial({color:0x151515, emissive:0x2a2a2a, roughness:.8}));
     this.el.object3D.add(m);
+    this.el.handMesh = m;   // el loco la apoya sobre la superficie al tocar
   }
 });
 
-/* ============ LUZ FLUORESCENTE QUE PARPADEA ============ */
+/* ============ LUZ QUE PARPADEA ============ */
 AFRAME.registerComponent('flicker',{
   schema:{base:{default:12}},
   init(){ this.off = 0; },
   tick(t){
     const l = this.el.components.light; if(!l || !l.light) return;
     if(Math.random() < 0.004) this.off = t + 60 + Math.random()*140;
-    const k = (t < this.off) ? 0.15 : (0.95 + Math.sin(t*0.02)*0.05);
-    l.light.intensity = this.data.base * k;
+    l.light.intensity = this.data.base * ((t < this.off) ? 0.15 : (0.95 + Math.sin(t*0.02)*0.05));
   }
 });
 
@@ -135,8 +183,9 @@ AFRAME.registerComponent('gorilla-loco',{
     this.cam = this.el.querySelector('#head');
     this.grip = [false,false];
     this.prev = [new THREE.Vector3(), new THREE.Vector3()];
-    this.vel = new THREE.Vector3();
-    this.d = new THREE.Vector3(); this.mv = new THREE.Vector3(); this.vs = new THREE.Vector3();
+    this.vel = new THREE.Vector3(); this.d = new THREE.Vector3();
+    this.mv = new THREE.Vector3(); this.vs = new THREE.Vector3();
+    this.off = new THREE.Vector3(); this.q = new THREE.Quaternion();
     this.has = false; this.placed = false;
     this.hands.forEach((h,i)=>{
       h.addEventListener('gripdown',()=>{ this.grip[i]=true; });
@@ -155,50 +204,111 @@ AFRAME.registerComponent('gorilla-loco',{
     const dt = Math.min(dtms/1000, 0.05); if(dt <= 0) return;
     const cp = this.cam.object3D.position;
 
-    // al entrar a VR: apoyar el cuerpo justo sobre el suelo (sin caida inicial)
     if(!this.placed){
       if(cp.y < 0.3) return;
-      rig.y = 0.02 - (cp.y - (BODY_DROP + 0.3));
+      rig.y = 0.02 - (cp.y - (BODY_DROP + CHEST_R));
       this.placed = true; this.vel.set(0,0,0); this.has = false;
     }
 
-    // --- manos: empujar / agarrar ---
+    // --- manos ---
     const mv = this.mv.set(0,0,0), vs = this.vs.set(0,0,0); let n = 0;
     for(let i=0;i<2;i++){
-      const lp = this.hands[i].object3D.position, pv = this.prev[i], d = this.d;
+      const hand = this.hands[i], lp = hand.object3D.position, pv = this.prev[i], d = this.d;
+      const depth = probe(rig.x+lp.x, rig.y+lp.y, rig.z+lp.z, HAND_R);
+      const hm = hand.handMesh;
+      if(hm){ // la mano visible se queda sobre la superficie, no la atraviesa
+        if(depth > 0){
+          this.off.set(CN.x*depth, CN.y*depth, CN.z*depth)
+                  .applyQuaternion(this.q.copy(hand.object3D.quaternion).invert());
+          hm.position.copy(this.off);
+        } else hm.position.set(0,0,0);
+      }
       if(!this.has){ pv.copy(lp); continue; }
       d.copy(lp).sub(pv); pv.copy(lp);
-      if(d.lengthSq() > 0.25) continue; // salto de tracking: ignorar
-      const depth = probe(rig.x+lp.x, rig.y+lp.y, rig.z+lp.z, HAND_R);
-      if(depth > 0 && (this.grip[i] || (d.x*CN.x + d.y*CN.y + d.z*CN.z) < 0.002)){
-        mv.sub(d); vs.addScaledVector(d, -1/dt); n++;
+      const l2 = d.lengthSq();
+      if(l2 > 0.25 || depth <= 0) continue;
+      const pushing = (d.x*CN.x + d.y*CN.y + d.z*CN.z) < 0.002;
+      if(this.grip[i] || pushing){
+        n++;
+        if(l2 > 2.5e-7){ mv.sub(d); vs.addScaledVector(d, -1/dt); } // zona muerta: el temblor no te mueve
       }
     }
     this.has = true;
 
+    let sx=0, sy=0, sz=0;
     if(n){
-      rig.add(mv.divideScalar(n));
-      this.vel.lerp(vs.divideScalar(n), 0.6);   // inercia para saltar al soltar
+      mv.divideScalar(n); sx=mv.x; sy=mv.y; sz=mv.z;
+      this.vel.lerp(vs.divideScalar(n), 0.6);
     } else {
       this.vel.y -= GRAVITY*dt;
       this.vel.multiplyScalar(Math.max(0, 1-0.25*dt));
     }
     if(this.vel.lengthSq() > MAX_SPEED*MAX_SPEED) this.vel.setLength(MAX_SPEED);
-    if(!n) rig.addScaledVector(this.vel, dt);
+    if(!n){ sx=this.vel.x*dt; sy=this.vel.y*dt; sz=this.vel.z*dt; }
 
-    // --- cuerpo: cabeza y pecho colisionan con el mundo ---
-    for(let pass=0; pass<3; pass++){
-      for(let k=0;k<2;k++){
-        const oy = k ? 0 : BODY_DROP, r = k ? 0.2 : 0.3; // k0 pecho, k1 cabeza
-        const dep = probe(rig.x+cp.x, rig.y+cp.y-oy, rig.z+cp.z, r);
-        if(dep > 0){
-          rig.x += CN.x*dep; rig.y += CN.y*dep; rig.z += CN.z*dep;
-          const vn = this.vel.dot(CN);
-          if(vn < 0) this.vel.addScaledVector(CN, -vn);
+    // --- movimiento en subpasos + colision de pecho y cabeza ---
+    const len = Math.sqrt(sx*sx+sy*sy+sz*sz);
+    const ns = Math.min(6, Math.max(1, Math.ceil(len/0.1)));
+    let grounded = false;
+    for(let s=0;s<ns;s++){
+      rig.x += sx/ns; rig.y += sy/ns; rig.z += sz/ns;
+      for(let pass=0; pass<2; pass++){
+        for(let k=0;k<2;k++){
+          const oy = k ? 0 : BODY_DROP, r = k ? HEAD_R : CHEST_R;
+          const dep = probe(rig.x+cp.x, rig.y+cp.y-oy, rig.z+cp.z, r);
+          if(dep > 0){
+            rig.x += CN.x*dep; rig.y += CN.y*dep; rig.z += CN.z*dep;
+            const vn = this.vel.dot(CN);
+            if(vn < 0) this.vel.addScaledVector(CN, -vn);
+            if(CN.y > 0.6) grounded = true;
+          }
         }
       }
     }
+    // friccion: al apoyarte en el suelo sin impulso, te detienes
+    if(grounded && !n){
+      const f = Math.exp(-GROUND_FRICTION*dt);
+      this.vel.x *= f; this.vel.z *= f;
+    }
     if(rig.y < -30) this.reset();
+  }
+});
+
+/* ============ HISTORIA: puerta y primer encuentro ============ */
+AFRAME.registerComponent('story',{
+  init(){ this.blink = 0; },
+  tick(t, dtms){
+    if(!DOOR || !APE) return;
+    if(!this.rig){
+      this.rig = document.getElementById('rig'); this.cam = document.getElementById('head');
+      this.light = document.getElementById('apelight');
+    }
+    const dt = Math.min(dtms/1000, 0.05);
+    const rp = this.rig.object3D.position, cp = this.cam.object3D.position;
+    const hx = rp.x+cp.x, hy = rp.y+cp.y, hz = rp.z+cp.z;
+
+    // la puerta se abre al acercarte desde el lobby
+    if(DOOR.state === 'closed' && hz > -2.6 && hy > -1){
+      const dz = hz + 2.6;
+      if(hx*hx + dz*dz < 5){
+        DOOR.state = 'opening';
+        const i = SOLIDS.indexOf(DOOR.solid); if(i >= 0) SOLIDS.splice(i,1);
+      }
+    }
+    if(DOOR.state === 'opening'){
+      DOOR.mesh.position.y += 1.6*dt;
+      if(DOOR.mesh.position.y >= DOOR.y0 + 2.45){ DOOR.mesh.position.y = DOOR.y0 + 2.45; DOOR.state = 'open'; }
+    }
+
+    // el mono desaparece si te acercas por abajo
+    if(!APE.gone && hy < -2){
+      const dx = hx-APE.x, dz = hz-APE.z;
+      if(dx*dx + dz*dz < 16){ APE.group.visible = false; APE.gone = true; this.blink = 0.6; }
+    }
+    if(this.light && this.light.components.light && this.light.components.light.light){
+      this.light.components.light.light.intensity = this.blink > 0 ? 0 : 14;
+    }
+    if(this.blink > 0) this.blink -= dt;
   }
 });
 </script>
@@ -210,18 +320,20 @@ AFRAME.registerComponent('gorilla-loco',{
          webxr="referenceSpaceType:local-floor"
          vr-mode-ui="enabled:true">
 
-  <!-- Luces (pocas, sin sombras: Quest 2). Si se ve muy oscuro/claro, cambia 'intensity'. -->
+  <!-- Luces: pocas y sin sombras (Quest 2). Ajusta 'intensity' si ves muy oscuro/claro. -->
   <a-entity light="type:ambient; color:#667; intensity:2"></a-entity>
-  <a-entity light="type:point; color:#cfe0c8; intensity:12; distance:14; decay:1" position="-4 3.5 -3"></a-entity>
-  <a-entity light="type:point; color:#cfe0c8; intensity:12; distance:14; decay:1" position="4 3.5 3" flicker="base:12"></a-entity>
-  <a-entity light="type:point; color:#b8c8d8; intensity:9; distance:12; decay:1" position="0 3.5 6"></a-entity>
+  <a-entity light="type:point; color:#cfe0c8; intensity:12; distance:7.5; decay:1" position="-3.5 3.4 -0.5"></a-entity>
+  <a-entity light="type:point; color:#cfe0c8; intensity:12; distance:7.5; decay:1" position="3.5 3.4 3.5" flicker="base:12"></a-entity>
+  <a-entity light="type:point; color:#b8c8d8; intensity:8; distance:5; decay:1" position="0 -1.3 -5"></a-entity>
+  <a-entity id="apelight" light="type:point; color:#9fb0c0; intensity:14; distance:5; decay:1" position="5.8 -1.8 -6.6"></a-entity>
+  <a-entity light="type:point; color:#b8c8d8; intensity:6; distance:5; decay:1" position="-3 -1.6 1" flicker="base:6"></a-entity>
 
   <a-entity lobby></a-entity>
+  <a-entity story></a-entity>
 
-  <a-text value="ETAPA 1 - LOBBY&#10;Empuja suelo y paredes con las manos&#10;Mantén GRIP para agarrarte y trepar&#10;Y / B: reaparecer"
+  <a-text value="ETAPA 2&#10;Empuja suelo y paredes con las manos&#10;GRIP para agarrarte y trepar&#10;Y / B: reaparecer&#10;Acercate a la puerta verde"
           position="-4.2 2 -7.9" align="center" width="4" color="#8a8a86"></a-text>
 
-  <!-- Jugador -->
   <a-entity id="rig" gorilla-loco position="0 0 5">
     <a-entity id="head" camera look-controls wasd-controls="enabled:false" position="0 1.6 0"></a-entity>
     <a-entity id="lh" oculus-touch-controls="hand:left; model:false" hand-body></a-entity>
